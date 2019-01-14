@@ -1,7 +1,9 @@
+# from https://github.com/roseengineering/RasPi-Si5351.py
 
 from Adafruit_I2C import Adafruit_I2C
-import smbus
+import smbus2
 import time
+import math
 
 SI5351_REGISTER_0_DEVICE_STATUS                       = 0
 SI5351_REGISTER_1_INTERRUPT_STATUS_STICKY             = 1
@@ -109,6 +111,7 @@ class Si5351(object):
         self.crystalFreq     = SI5351_CRYSTAL_FREQ_25MHZ
         self.crystalLoad     = SI5351_CRYSTAL_LOAD_10PF
         self.crystalPPM      = 30
+        self.crystalPPM      = -30
         self.plla_freq       = 0
         self.pllb_freq       = 0
 
@@ -287,19 +290,53 @@ class Si5351(object):
         self.i2c.write8(SI5351_REGISTER_3_OUTPUT_ENABLE_CONTROL, val)
 
 
+# from https://github.com/jpalczewski/RasPi-Si5351-cli/commit/df99c7692c85fdd14e19660bb4d4d05d95dd708c
+# modified to set the final divider to 8 for frequencies under 0.6 mhz
+
+    def setFreq(self, pll, output, freqMHz):
+        # set the output frequency
+        # Note:  if the frequency is under 600KHz, we need to divide by something on the ass-end of the chip.
+        # 8 sounds good for my purposes.
+        if freqMHz < 0.6:
+          freqMHz = freqMHz * 8
+          rdiv=8 
+        else:
+          rdiv=1
+
+        synthDiv = int(math.ceil(600/freqMHz))
+        if(synthDiv < 6): # Si5351 requires it to be between 6 and 1800
+          synthDiv += 6 - synthDiv
+        if(synthDiv > 1800): # Si5351 requires it to be between 6 and 1800
+          raise ValueError("synthDiv > 1800, calculated as: " + str(synthDiv))
+        intFreq = freqMHz*synthDiv # intermediate PLL frequency
+        if(intFreq > 900):
+          raise ValueError("Error calculating multisynth divisor for " + str(freqMHz) + " tried " + str(synthDiv))
+        pllMult = intFreq/25 # PLL multiplier as a floating point number
+        pllBase = int(pllMult) # base multiplier for the PLL
+        if((pllBase < 15) or (pllBase > 90)):
+          raise ValueError("pllBase outside of [0,90], calculated as: " + str(pllBase))
+        pllDenom = 1000000 # PLL multiplier denominator
+        pllNum = int(math.modf(pllMult)[0]*pllDenom) # PLL multiplier numerator
+        self.setupPLL(pll, pllBase, pllNum, pllDenom)
+        self.setupMultisynth(output, pll, synthDiv)
+        if rdiv == 8: 
+          self.setupRdiv(output, self.R_DIV_8)
+
+#         print ("Freq set to ", ( 25.0 * (pllBase + pllNum / pllDenom) / synthDiv) / rdiv)
+
 if __name__ == '__main__':
     si = Si5351()
 
-    print "Set Output #0 to 13.703704 MHz"  
-
-    # vco = 25 MHz * (24 + 2 / 3) = 616.67 MHz
-    si.setupPLL(si.PLL_A, 24, 2, 3)
-    # out = 616.67 MHz / 45 = 13.703704 MHz 
-    si.setupMultisynth(0, si.PLL_A, 45)
-    # si.setupRdiv(0, si.R_DIV_64)
+    si.setFreq(pll=si.PLL_A, output=0, freqMHz = 7.199)
     si.enableOutputs(True)
+    
+    while True: 
+      si.setFreq(pll=si.PLL_A, output=0, freqMHz = 0.4735)
+      print ("Enabling")
+      si.enableOutputs(True)
+      time.sleep(0.2)
+      print ("Disabling")
+      si.enableOutputs(False)
+      time.sleep(0.2)
 
-
-
-
-
+      
