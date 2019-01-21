@@ -105,6 +105,10 @@ class Si5351(object):
     R_DIV_64  = 6
     R_DIV_128 = 7
 
+    prev_pll = 0;
+    prev_pll_mult = 0
+    prev_pll_num = 0;
+    prev_pll_denom = 0; 
 
     def __init__(self, address = SI5351_I2C_ADDRESS_DEFAULT, busnum=-1):
 
@@ -163,6 +167,16 @@ class Si5351(object):
         # P2[19:0] = 128 * num - denom * floor(128*(num/denom))
         # P3[19:0] = denom
 
+        # before anything, check if this is really necessary. 
+        if (self.prev_pll == pll and self.prev_pll_mult == mult and self.prev_pll_num == num and self.prev_pll_denom == denom): 
+            print ("skipping pll setup")
+            return 
+        else:
+            self.prev_pll = pll 
+            self.prev_pll_mult = mult
+            self.prev_pll_num = num 
+            self.prev_pll_denom = denom
+
         # Set the main PLL config registers
         P1 = 128 * mult + int(128.0 * num / denom) - 512
         P2 = 128 * num - denom * int(128.0 * num / denom)
@@ -174,7 +188,7 @@ class Si5351(object):
         # The datasheet is a nightmare of typos and inconsistencies here!
         self.i2c.write8(baseaddr,   (P3 & 0x0000FF00) >> 8)
         self.i2c.write8(baseaddr + 1, (P3 & 0x000000FF))
-        self.i2c.write8(baseaddr + 2, (P1 & 0x00030000) >> 16)
+        self.i2c.write8(baseaddr + 2, (P1 & 0x00030000) >> 16)	
         self.i2c.write8(baseaddr + 3, (P1 & 0x0000FF00) >> 8)
         self.i2c.write8(baseaddr + 4, (P1 & 0x000000FF))
         self.i2c.write8(baseaddr + 5, ((P3 & 0x000F0000) >> 12) | ((P2 & 0x000F0000) >> 16) )
@@ -200,7 +214,7 @@ class Si5351(object):
         return self.i2c.write8(Rreg, (div & 0x07) << 4)
 
 
-    def setupMultisynth(self, output, pll, div, num=0, denom=1):
+    def setupMultisynth(self, output, pll, div, num=0, denom=1, rDiv=R_DIV_1):
 
         # @brief  Configures the Multisynth divider, which determines the
         #         output clock frequency based on the specified PLL input.
@@ -267,7 +281,8 @@ class Si5351(object):
         # Set the MSx config registers
         self.i2c.write8(baseaddr,   (P3 & 0x0000FF00) >> 8)
         self.i2c.write8(baseaddr + 1, (P3 & 0x000000FF))
-        self.i2c.write8(baseaddr + 2, (P1 & 0x00030000) >> 16)	# ToDo: Add DIVBY4 (>150MHz) and R0 support (<500kHz) later
+        self.i2c.write8(baseaddr + 2, ((P1 & 0x00030000) >> 16) | rDiv) # k5dru per http://qrp-labs.com/images/synth/demo1/si5351a.c
+                                                                        # but: rDiv doesn't seem to work here. Blerg.
         self.i2c.write8(baseaddr + 3, (P1 & 0x0000FF00) >> 8)
         self.i2c.write8(baseaddr + 4, (P1 & 0x000000FF))
         self.i2c.write8(baseaddr + 5, ((P3 & 0x000F0000) >> 12) | ((P2 & 0x000F0000) >> 16) )
@@ -297,17 +312,16 @@ class Si5351(object):
         # set the output frequency
         # Note:  if the frequency is under 600KHz, we need to divide by something on the ass-end of the chip.
         # 8 sounds good for my purposes.
-        if freqMHz < 0.6:
-          freqMHz = freqMHz * 8
-          rdiv=8 
-        else:
-          rdiv=1
+        rdiv=1
+        while freqMHz < 0.6:
+          freqMHz = freqMHz * 2
+          rdiv = rdiv * 2 
 
         synthDiv = int(math.ceil(600/freqMHz))
         if(synthDiv < 6): # Si5351 requires it to be between 6 and 1800
           synthDiv += 6 - synthDiv
         if(synthDiv > 1800): # Si5351 requires it to be between 6 and 1800
-          raise ValueError("synthDiv > 1800, calculated as: " + str(synthDiv))
+          raise ValueError("synthDiv > 1800, calculated as: " + str(synthDiv) + " for freq", freqMHz)
         intFreq = freqMHz*synthDiv # intermediate PLL frequency
         if(intFreq > 900):
           raise ValueError("Error calculating multisynth divisor for " + str(freqMHz) + " tried " + str(synthDiv))
@@ -318,9 +332,27 @@ class Si5351(object):
         pllDenom = 1000000 # PLL multiplier denominator
         pllNum = int(math.modf(pllMult)[0]*pllDenom) # PLL multiplier numerator
         self.setupPLL(pll, pllBase, pllNum, pllDenom)
-        self.setupMultisynth(output, pll, synthDiv)
-        if rdiv == 8: 
-          self.setupRdiv(output, self.R_DIV_8)
+        if rdiv == 1: 
+          rDiv=self.R_DIV_1
+        elif rdiv == 2: 
+          rDiv=self.R_DIV_2
+        elif rdiv == 4: 
+          rDiv=self.R_DIV_4
+        elif rdiv == 8: 
+          rDiv=self.R_DIV_8
+        elif rdiv == 16: 
+          rDiv=self.R_DIV_16
+        elif rdiv == 32: 
+          rDiv=self.R_DIV_32
+        elif rdiv == 64: 
+          rDiv=self.R_DIV_64
+        elif rdiv == 128: 
+          rDiv=self.R_DIV_128
+        else:
+          ValueError("Frequency too low resulted in final rdiv value more than 128; value is " + str(rdiv))
+
+        self.setupMultisynth(output, pll, synthDiv, rDiv)
+        self.setupRdiv(output, rDiv)
 
 #         print ("Freq set to ", ( 25.0 * (pllBase + pllNum / pllDenom) / synthDiv) / rdiv)
 
@@ -331,7 +363,7 @@ if __name__ == '__main__':
     si.enableOutputs(True)
     
     while True: 
-      si.setFreq(pll=si.PLL_A, output=0, freqMHz = 0.4735)
+      si.wsetFreq(pll=si.PLL_A, output=0, freqMHz = 0.4735)
       print ("Enabling")
       si.enableOutputs(True)
       time.sleep(0.2)
